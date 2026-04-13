@@ -97,12 +97,12 @@ def benchmark_cpu(model_name, num_tokens):
 
     warm_payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": "Warmup"}],
+        "prompt": "Q: Why is the sky blue?\nA:",
         "stream": False,
-        "options": {"num_gpu": 0}
+        "options": {"num_gpu": 0, "min_predict": 1}
     }
 
-    warm_resp = requests.post("http://localhost:11434/api/chat", json=warm_payload)
+    warm_resp = requests.post("http://localhost:11434/api/generate", json=warm_payload)
     warm_end = time.perf_counter()
     warm_elapsed = warm_end - warm_start
 
@@ -114,10 +114,8 @@ def benchmark_cpu(model_name, num_tokens):
 
     payload = {
         "model": model_name,
-        "messages": [
-            {"role": "user", "content": "Explain why the sky is blue in one paragraph."}
-        ],
-        "options": {"num_predict": num_tokens, "num_gpu": 0},
+        "prompt": "Q: Why is the sky blue?\nA:",
+        "options": {"num_predict": num_tokens, "num_gpu": 0, "min_predict": 1},
         "stream": True
     }
 
@@ -125,21 +123,29 @@ def benchmark_cpu(model_name, num_tokens):
     ttft = None
     full_text = ""
 
-    r = requests.post("http://localhost:11434/api/chat", json=payload, stream=True)
+    r = requests.post("http://localhost:11434/api/generate", json=payload, stream=True)
 
     try:
         for line in r.iter_lines():
             if not line:
                 continue
 
-            if ttft is None:
+            data = json.loads(line.decode("utf-8"))
+       
+            
+            # ✅ TTFT when first token arrives
+            if ttft is None and "response" in data and data["response"]:
                 ttft = time.perf_counter() - start
                 print(f"TTFT: {ttft:.4f}s")
 
-            data = json.loads(line.decode("utf-8"))
-            delta = data["message"]["content"]
-            if delta:
-                full_text += delta
+            # ✅ Accumulate token text
+            if "response" in data:
+                full_text += data["response"]
+
+            # ✅ Wait for the final done packet
+            if data.get("done"):
+                break
+
     finally:
         r.close()
 
@@ -160,7 +166,7 @@ def benchmark_cpu(model_name, num_tokens):
 #                   GPU OLLAMA BENCHMARK
 # --------------------------------------------------------
 def benchmark_gpu(model_name, num_tokens):
-    print(f"\n\n___CPU Ollama Benchmark: {model_name}___")
+    print(f"\n\n___GPU Ollama Benchmark: {model_name}___")
 
     # Warmup
     print("Starting warmup...")
@@ -168,12 +174,12 @@ def benchmark_gpu(model_name, num_tokens):
 
     warm_payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": "Warmup"}],
-        "stream": False,
-        "options": {"num_gpu": 1}
+        "prompt": "Q: Why is the sky blue?\nA:",
+        "stream": True,
+        "options": { "min_predict": num_tokens, "num_gpu": 1}
     }
 
-    warm_resp = requests.post("http://localhost:11434/api/chat", json=warm_payload)
+    warm_resp = requests.post("http://localhost:11434/api/generate", json=warm_payload)
     warm_end = time.perf_counter()
     warm_elapsed = warm_end - warm_start
 
@@ -185,10 +191,8 @@ def benchmark_gpu(model_name, num_tokens):
 
     payload = {
         "model": model_name,
-        "messages": [
-            {"role": "user", "content": "Explain why the sky is blue in one paragraph."}
-        ],
-        "options": {"num_predict": num_tokens, "num_gpu": 1},
+        "prompt": "Q: Why is the sky blue?\nA:",
+        "options": {"num_predict": num_tokens, "min_predict": num_tokens, "num_gpu": 1},
         "stream": True
     }
 
@@ -196,21 +200,28 @@ def benchmark_gpu(model_name, num_tokens):
     ttft = None
     full_text = ""
 
-    r = requests.post("http://localhost:11434/api/chat", json=payload, stream=True)
+    r = requests.post("http://localhost:11434/api/generate", json=payload, stream=True)
 
     try:
         for line in r.iter_lines():
             if not line:
                 continue
 
-            if ttft is None:
+            data = json.loads(line.decode("utf-8"))
+       
+            # ✅ TTFT when first token arrives
+            if ttft is None and "response" in data and data["response"]:
                 ttft = time.perf_counter() - start
                 print(f"TTFT: {ttft:.4f}s")
 
-            data = json.loads(line.decode("utf-8"))
-            delta = data["message"]["content"]
-            if delta:
-                full_text += delta
+            # ✅ Accumulate token text
+            if "response" in data:
+                full_text += data["response"]
+
+            # ✅ Wait for the final done packet
+            if data.get("done"):
+                break
+
     finally:
         r.close()
 
@@ -308,7 +319,7 @@ def main():
     parser.add_argument("--models-file", help="File with model names (one per line)")
     parser.add_argument("--num-tokens", type=int, default=20)
     parser.add_argument("--csv-file", default="benchmark_results.csv")
-    parser.add_argument("--device", choices=["cpu", "gpu", "gpu-hailo", "both"], default="both",
+    parser.add_argument("--device", choices=["cpu", "gpu", "hailo", "both"], default="both",
                         help="Which device(s) to benchmark: cpu, gpu, or both")
     parser.add_argument("--repeat", type=int, default=1,
                         help="Number of repeated runs for averaging")
@@ -347,12 +358,12 @@ def main():
             )
 
             log_run_details(
-                args.csv_file, model_name, "GPU-hailo-Ollama",
+                args.csv_file, model_name, "GPU-Ollama",
                 args.num_tokens, gpu_avg["deltas"]
             )
 
         # GPU Hailo Benchmarking
-        if args.device in ("gpu-hailo"):
+        if args.device in ("hailo"):
             gpu_runs = [benchmark_gpu_hailo(model_name, args.num_tokens) for _ in range(num_runs)]
             gpu_avg = average_runs(gpu_runs)
 
